@@ -1,5 +1,8 @@
 import torch
 from swin_transformer_pytorch import SwinTransformer
+import numpy as np
+torch.set_printoptions(threshold=np.inf)
+np.set_printoptions(threshold=np.inf)
 
 net = SwinTransformer(
     hidden_dim=96,

@@ -2,6 +2,8 @@ import torch
 from torch import nn, einsum
 import numpy as np
 from einops import rearrange, repeat
+torch.set_printoptions(threshold=np.inf)
+np.set_printoptions(threshold=np.inf)
 
 
 class CyclicShift(nn.Module):
@@ -51,19 +53,21 @@ def create_mask(window_size, displacement, upper_lower, left_right):
     if upper_lower:
         mask[-displacement * window_size:, :-displacement * window_size] = float('-inf')
         mask[:-displacement * window_size, -displacement * window_size:] = float('-inf')
+        print(mask.numpy())
 
     if left_right:
         mask = rearrange(mask, '(h1 w1) (h2 w2) -> h1 w1 h2 w2', h1=window_size, h2=window_size)
         mask[:, -displacement:, :, :-displacement] = float('-inf')
         mask[:, :-displacement, :, -displacement:] = float('-inf')
         mask = rearrange(mask, 'h1 w1 h2 w2 -> (h1 w1) (h2 w2)')
+        print(mask.numpy())
 
     return mask
 
 
 def get_relative_distances(window_size):
-    indices = torch.tensor(np.array([[x, y] for x in range(window_size) for y in range(window_size)]))
-    distances = indices[None, :, :] - indices[:, None, :]
+    indices = torch.tensor(np.array([[x, y] for x in range(window_size) for y in range(window_size)]))  # (window_size*window_size, 2)
+    distances = indices[None, :, :] - indices[:, None, :]  # (window_size*window_size, window_size*window_size, 2)
     return distances
 
 
@@ -89,28 +93,31 @@ class WindowAttention(nn.Module):
 
         self.to_qkv = nn.Linear(dim, inner_dim * 3, bias=False)
 
-        if self.relative_pos_embedding:
-            self.relative_indices = get_relative_distances(window_size) + window_size - 1
+        if self.relative_pos_embedding:  # 相对位置编码
+            # 保存了窗口内每一个元素的相对位置索引
+            self.relative_indices = get_relative_distances(window_size) + window_size - 1  # 维度为(window_size**2, window_size**2, 2)
             self.pos_embedding = nn.Parameter(torch.randn(2 * window_size - 1, 2 * window_size - 1))
         else:
-            self.pos_embedding = nn.Parameter(torch.randn(window_size ** 2, window_size ** 2))
+            self.pos_embedding = nn.Parameter(torch.randn(window_size ** 2, window_size ** 2))  # 绝对位置编码
 
         self.to_out = nn.Linear(inner_dim, dim)
 
-    def forward(self, x):
+    def forward(self, x):  # x (b, new_h, new_w, out_channels)
         if self.shifted:
             x = self.cyclic_shift(x)
 
         b, n_h, n_w, _, h = *x.shape, self.heads
 
-        qkv = self.to_qkv(x).chunk(3, dim=-1)
+        qkv = self.to_qkv(x).chunk(3, dim=-1)  # 长度为3的元组, 元组中每个元素的维度都和x一样
         nw_h = n_h // self.window_size
         nw_w = n_w // self.window_size
 
+        # qkv的维度都是 (b, h, 窗口个数, 窗口大小, 每个窗口元素的嵌入维度)
         q, k, v = map(
             lambda t: rearrange(t, 'b (nw_h w_h) (nw_w w_w) (h d) -> b h (nw_h nw_w) (w_h w_w) d',
                                 h=h, w_h=self.window_size, w_w=self.window_size), qkv)
 
+        # dots的维度为(b, h, 窗口个数, 窗口大小, 窗口大小)
         dots = einsum('b h w i d, b h w j d -> b h w i j', q, k) * self.scale
 
         if self.relative_pos_embedding:
@@ -127,7 +134,7 @@ class WindowAttention(nn.Module):
         out = einsum('b h w i j, b h w j d -> b h w i d', attn, v)
         out = rearrange(out, 'b h (nw_h nw_w) (w_h w_w) d -> b (nw_h w_h) (nw_w w_w) (h d)',
                         h=h, w_h=self.window_size, w_w=self.window_size, nw_h=nw_h, nw_w=nw_w)
-        out = self.to_out(out)
+        out = self.to_out(out)  # 最后out的维度和x相同
 
         if self.shifted:
             out = self.cyclic_back_shift(out)
@@ -161,8 +168,8 @@ class PatchMerging(nn.Module):
     def forward(self, x):
         b, c, h, w = x.shape
         new_h, new_w = h // self.downscaling_factor, w // self.downscaling_factor
-        x = self.patch_merge(x).view(b, -1, new_h, new_w).permute(0, 2, 3, 1)
-        x = self.linear(x)
+        x = self.patch_merge(x).view(b, -1, new_h, new_w).permute(0, 2, 3, 1)  # (b, new_h, new_w, c*window_size*window_size)
+        x = self.linear(x)  # (b, new_h, new_w, out_channels)
         return x
 
 
@@ -185,7 +192,7 @@ class StageModule(nn.Module):
             ]))
 
     def forward(self, x):
-        x = self.patch_partition(x)
+        x = self.patch_partition(x)  # (b, c, h, w) -> (b, new_h, new_w, out_channels)
         for regular_block, shifted_block in self.layers:
             x = regular_block(x)
             x = shifted_block(x)
